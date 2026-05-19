@@ -9,7 +9,7 @@ It is designed for a planner/executor workflow:
 3. Codex optionally verifies the requested OpenCode model.
 4. Codex starts one OpenCode run.
 5. Codex waits and monitors logs without interrupting the run.
-6. Codex inspects changed files after OpenCode exits.
+6. Codex inspects the parsed run summary and changed files after OpenCode exits.
 7. Codex checks the result against the original task and asks whether there are any gaps.
 8. If there are gaps, Codex delegates a focused improvement/fix to OpenCode and repeats the check.
 
@@ -45,8 +45,10 @@ plan -> delegate to OpenCode -> wait -> inspect result -> check for gaps -> fix 
 After every delegated task, Codex should:
 
 - read the OpenCode log tail,
+- read the parsed OpenCode run summary,
 - inspect changed files,
 - run or review relevant tests/builds when practical,
+- perform a browser smoke check for frontend/UI changes when practical,
 - compare the result with the original request,
 - explicitly check whether anything is missing or wrong,
 - ask OpenCode for a focused follow-up fix when gaps are found.
@@ -80,6 +82,7 @@ The server looks for OpenCode in:
 - `opencode_status`: show the current/last run status and recent log tail
 - `opencode_wait`: wait for the current run without interrupting it
 - `opencode_logs`: read recent OpenCode worker logs
+- `opencode_run_summary`: parse the JSONL log into final text, tool calls, verification-looking commands, warnings, and errors
 - `opencode_changed_files`: show Git status and diff stats for the run workspace
 - `opencode_models`: list models visible to OpenCode
 - `opencode_check_model`: check a `provider/model` string before starting
@@ -114,6 +117,7 @@ Use `opencode_delegation_template` to generate a consistent prompt shape for Ope
 - acceptance criteria,
 - verification commands,
 - required final report,
+- failed-verification reporting rules,
 - a reminder not to revert unrelated changes.
 
 ## Install as a Codex Plugin
@@ -211,6 +215,8 @@ Logs are JSONL files under:
 ```text
 ~/.local/state/codex-opencode-worker/logs/
 ```
+
+`opencode_status` and `opencode_wait` include a compact `runSummary` for the current or latest task. Use `opencode_run_summary` when Codex needs a fuller parsed view of the OpenCode log before doing its own gap check.
 
 ## Safety Notes
 

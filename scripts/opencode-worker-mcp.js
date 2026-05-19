@@ -3,19 +3,21 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { spawn, execFile } = require("child_process");
+const { spawn, execFile, execFileSync } = require("child_process");
 
 const stateDir = path.join(os.homedir(), ".local", "state", "codex-opencode-worker");
 const logDir = path.join(stateDir, "logs");
 const statePath = path.join(stateDir, "state.json");
 fs.mkdirSync(logDir, { recursive: true });
 
-const serverVersion = "0.1.1";
+const serverVersion = "0.1.2";
 const liveChildren = new Map();
 const postRunChecklist = [
+  "Call opencode_run_summary to inspect parsed OpenCode output, tool calls, and verification-looking commands.",
   "Call opencode_logs to inspect the OpenCode run output.",
   "Call opencode_changed_files for the run workspace.",
   "Read the affected files and run relevant tests/builds when practical.",
+  "For frontend/UI work, run a real browser smoke check or screenshot review from Codex.",
   "Compare the result against the original plan and acceptance criteria.",
   "If gaps remain, delegate a narrow follow-up fix to OpenCode and repeat the check."
 ];
@@ -121,6 +123,46 @@ function opencodeOutput(args) {
   });
 }
 
+function gitOutputSync(args, cwd) {
+  try {
+    return {
+      ok: true,
+      stdout: execFileSync("git", args, { cwd, encoding: "utf8" }).trim(),
+      stderr: "",
+      error: null
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      stdout: error.stdout ? String(error.stdout).trim() : "",
+      stderr: error.stderr ? String(error.stderr).trim() : "",
+      error: error.message
+    };
+  }
+}
+
+function gitSnapshotSync(cwd) {
+  const insideWorkTree = gitOutputSync(["rev-parse", "--is-inside-work-tree"], cwd);
+  if (!insideWorkTree.ok || insideWorkTree.stdout !== "true") {
+    return {
+      isGitRepository: false,
+      error: insideWorkTree.stderr || insideWorkTree.error || "Not a git repository"
+    };
+  }
+
+  const head = gitOutputSync(["rev-parse", "--short", "HEAD"], cwd);
+  const branch = gitOutputSync(["branch", "--show-current"], cwd);
+  const status = gitOutputSync(["status", "--short"], cwd);
+  return {
+    isGitRepository: true,
+    head: head.ok ? head.stdout : null,
+    branch: branch.ok ? branch.stdout : null,
+    status: status.ok ? status.stdout : "",
+    dirty: Boolean(status.stdout),
+    errors: [head, branch, status].filter((item) => !item.ok).map((item) => item.stderr || item.error)
+  };
+}
+
 function startOpencode(input = {}) {
   const current = readState();
   if (taskRunning(current)) {
@@ -158,6 +200,7 @@ function startOpencode(input = {}) {
     messagePreview: previewText(input.message),
     acceptanceCriteria: Array.isArray(input.acceptanceCriteria) ? input.acceptanceCriteria : [],
     verificationCommands: Array.isArray(input.verificationCommands) ? input.verificationCommands : [],
+    gitBefore: gitSnapshotSync(cwd),
     logPath,
     startedAt: nowIso(),
     finishedAt: null,
@@ -202,6 +245,14 @@ function previewText(value, maxLength = 240) {
   return `${compact.slice(0, maxLength - 1)}…`;
 }
 
+function durationSeconds(state) {
+  if (!state || !state.startedAt) return null;
+  const started = Date.parse(state.startedAt);
+  const finished = state.finishedAt ? Date.parse(state.finishedAt) : Date.now();
+  if (!Number.isFinite(started) || !Number.isFinite(finished)) return null;
+  return Math.max(0, Math.round((finished - started) / 1000));
+}
+
 function summarizeState(state = readState(), tailLines = 40) {
   if (!state) {
     return { running: false, status: "idle" };
@@ -224,13 +275,16 @@ function summarizeState(state = readState(), tailLines = 40) {
     finishedAt: state.finishedAt,
     exitCode: state.exitCode,
     signal: state.signal,
+    durationSeconds: durationSeconds(state),
     requestedModel: state.requestedModel || null,
     requestedAgent: state.requestedAgent || null,
     taskTitle: state.taskTitle || null,
     messagePreview: state.messagePreview || null,
     acceptanceCriteria: state.acceptanceCriteria || [],
     verificationCommands: state.verificationCommands || [],
+    gitBefore: state.gitBefore || null,
     logPath: state.logPath,
+    runSummary: summarizeOpenCodeLog(state.logPath, { maxTextItems: 5, maxToolCalls: 10 }),
     tail: readLogTail(state.logPath, tailLines),
     nextCodexActions: running ? [
       "Do not start another OpenCode run while this one is running.",
@@ -243,6 +297,105 @@ function readLogTail(logPath, lines = 100) {
   if (!logPath || !fs.existsSync(logPath)) return "";
   const content = fs.readFileSync(logPath, "utf8");
   return content.split(/\r?\n/).filter(Boolean).slice(-Math.max(1, Number(lines) || 100)).join("\n");
+}
+
+function readLogLines(logPath) {
+  if (!logPath || !fs.existsSync(logPath)) return [];
+  return fs.readFileSync(logPath, "utf8").split(/\r?\n/).filter(Boolean);
+}
+
+function parseMaybeJson(line) {
+  try {
+    return JSON.parse(line);
+  } catch {
+    return null;
+  }
+}
+
+function compactValue(value, maxLength = 500) {
+  if (value === undefined || value === null) return "";
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return previewText(text, maxLength);
+}
+
+function looksLikeVerification(toolInfo) {
+  const text = `${toolInfo.title || ""} ${toolInfo.command || ""}`.toLowerCase();
+  return /\b(build|lint|test|typecheck|tsc|smoke|playwright|browser|docker|pytest|vitest|jest)\b/.test(text);
+}
+
+function summarizeOpenCodeLog(logPath, options = {}) {
+  const maxTextItems = Math.max(1, Number(options.maxTextItems ?? 8));
+  const maxToolCalls = Math.max(1, Number(options.maxToolCalls ?? 20));
+  const lines = readLogLines(logPath);
+  const summary = {
+    logPath: logPath || null,
+    eventCount: lines.length,
+    parsedEventCount: 0,
+    textTail: [],
+    toolCalls: [],
+    verificationResults: [],
+    errors: [],
+    warnings: []
+  };
+
+  for (const line of lines) {
+    const event = parseMaybeJson(line);
+    if (!event) {
+      const lowered = line.toLowerCase();
+      if (/\berror\b|failed|exception|cannot find module|build error/.test(lowered)) {
+        summary.errors.push(previewText(line, 500));
+      }
+      continue;
+    }
+
+    summary.parsedEventCount++;
+    const part = event.part || {};
+    if (part.type === "text" && typeof part.text === "string") {
+      summary.textTail.push(previewText(part.text, 900));
+      if (summary.textTail.length > maxTextItems) summary.textTail.shift();
+      const lowered = part.text.toLowerCase();
+      if (/failed|error|gap|risk|could not|cannot|pre-existing|preexisting/.test(lowered)) {
+        summary.warnings.push(previewText(part.text, 500));
+      }
+      continue;
+    }
+
+    if (part.type === "tool") {
+      const state = part.state || {};
+      const metadata = state.metadata || {};
+      const input = state.input || {};
+      const toolInfo = {
+        tool: part.tool || null,
+        title: part.title || metadata.description || null,
+        status: state.status || null,
+        command: input.command || null,
+        exit: typeof metadata.exit === "number" ? metadata.exit : null,
+        inputPreview: compactValue(input, 400),
+        outputPreview: compactValue(state.output || metadata.output, 700)
+      };
+
+      summary.toolCalls.push(toolInfo);
+      if (summary.toolCalls.length > maxToolCalls) summary.toolCalls.shift();
+
+      const failed = toolInfo.status === "failed" || (typeof toolInfo.exit === "number" && toolInfo.exit !== 0);
+      if (looksLikeVerification(toolInfo) || typeof toolInfo.exit === "number") {
+        summary.verificationResults.push({
+          title: toolInfo.title,
+          command: toolInfo.command,
+          exit: toolInfo.exit,
+          passed: typeof toolInfo.exit === "number" ? toolInfo.exit === 0 : !failed,
+          outputPreview: toolInfo.outputPreview
+        });
+      }
+      if (failed || /\berror\b|failed|cannot find module|build error/.test(toolInfo.outputPreview.toLowerCase())) {
+        summary.errors.push(`${toolInfo.title || toolInfo.tool || "tool"}: ${toolInfo.outputPreview}`);
+      }
+    }
+  }
+
+  summary.errors = summary.errors.slice(-10);
+  summary.warnings = summary.warnings.slice(-10);
+  return summary;
 }
 
 async function waitForOpencode(input = {}) {
@@ -291,13 +444,22 @@ async function changedFiles(input = {}) {
   const status = await gitOutput(["status", "--short"], cwd);
   const diffStat = await gitOutput(["diff", "--stat"], cwd);
   const stagedDiffStat = await gitOutput(["diff", "--cached", "--stat"], cwd);
+  const nameStatus = await gitOutput(["diff", "--name-status"], cwd);
+  const stagedNameStatus = await gitOutput(["diff", "--cached", "--name-status"], cwd);
+  const current = gitSnapshotSync(cwd);
   return {
     cwd,
     isGitRepository: true,
+    gitBefore: state?.gitBefore || null,
+    gitCurrent: current,
     status: status.stdout,
     diffStat: diffStat.stdout,
     stagedDiffStat: stagedDiffStat.stdout,
-    gitErrors: [status, diffStat, stagedDiffStat].filter((item) => !item.ok).map((item) => item.stderr || item.error)
+    nameStatus: nameStatus.stdout,
+    stagedNameStatus: stagedNameStatus.stdout,
+    gitErrors: [status, diffStat, stagedDiffStat, nameStatus, stagedNameStatus]
+      .filter((item) => !item.ok)
+      .map((item) => item.stderr || item.error)
   };
 }
 
@@ -342,11 +504,15 @@ ${verification}
 Final response:
 - Summarize changed files.
 - Report commands run and results.
+- If any verification command fails, report the exact command, exit status, and key error output. Do not call it pre-existing unless you have clear evidence from a baseline run or prior state.
+- For frontend/UI work, say whether a real browser/screenshot check is still needed from Codex.
 - List any gaps, risks, or follow-up needed.`,
     codexReminder: [
       "Before starting OpenCode, call opencode_status.",
       "Use opencode_run_and_wait for normal delegation.",
-      "After completion, run the post-run gap-check loop; do not trust the worker output alone."
+      "After completion, call opencode_run_summary and opencode_changed_files.",
+      "Re-run verification yourself when practical; do not trust the worker output alone.",
+      "For frontend/UI changes, Codex should do a browser smoke check after OpenCode exits."
     ]
   };
 }
@@ -482,6 +648,18 @@ const tools = [
     }
   },
   {
+    name: "opencode_run_summary",
+    description: "Parse the latest OpenCode JSONL log into text tail, tool calls, verification-looking commands, warnings, and errors for Codex review.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        logPath: { type: "string", description: "Optional explicit log file path. Defaults to the latest worker run log." },
+        maxTextItems: { type: "number", default: 8 },
+        maxToolCalls: { type: "number", default: 20 }
+      }
+    }
+  },
+  {
     name: "opencode_changed_files",
     description: "Show git status and diff stats for the workspace touched by the latest OpenCode run.",
     inputSchema: {
@@ -529,6 +707,10 @@ async function callTool(name, args) {
   if (name === "opencode_logs") {
     const state = readState();
     return { logPath: state?.logPath || null, tail: readLogTail(state?.logPath, args?.lines ?? 200) };
+  }
+  if (name === "opencode_run_summary") {
+    const state = readState();
+    return summarizeOpenCodeLog(args?.logPath || state?.logPath, args || {});
   }
   if (name === "opencode_changed_files") return await changedFiles(args);
   if (name === "opencode_delegation_template") return delegationTemplate(args);

@@ -29,8 +29,8 @@ When in doubt for implementation work, delegate. When OpenCode is unavailable or
 5. Start execution with `opencode_run_and_wait` for normal delegation, or `opencode_start` followed by `opencode_wait` for long jobs where progress checks are useful. Include the plan, owned files, acceptance criteria, and verification commands in the OpenCode prompt.
 6. Pass the selected OpenCode model as the `model` argument. The worker forwards it as `opencode run --model provider/model`.
 7. While a run is active, do not interrupt it and do not launch a second run.
-8. After completion, inspect `opencode_changed_files`, read relevant logs with `opencode_logs`, and verify the resulting workspace changes yourself.
-9. Always do a gap check before reporting success: compare the result against the original plan, read or run the affected files/tests when practical, and identify anything missing, broken, risky, or unclear.
+8. After completion, inspect `opencode_run_summary`, `opencode_changed_files`, and relevant raw logs with `opencode_logs`, then verify the resulting workspace changes yourself.
+9. Always do a gap check before reporting success: compare the result against the original plan, read or run the affected files/tests when practical, and identify anything missing, broken, risky, or unclear. Treat any failed verification command reported by OpenCode as a gap until Codex independently confirms or fixes it.
 10. If the gap check finds issues, ask OpenCode for a focused improvement/fix task, wait for it to finish, and repeat the verification and gap check loop.
 11. Only tell the user the task is complete after Codex has checked the result and either found no meaningful gaps or clearly listed remaining limitations.
 
@@ -43,6 +43,8 @@ When in doubt for implementation work, delegate. When OpenCode is unavailable or
 - `opencode_wait` waits only; it never kills or interrupts OpenCode.
 - The plugin intentionally has no stop, cancel, or kill tool.
 - Pass the workspace path as `cwd` when the task should run outside Codex's current working directory.
+- `opencode_run_summary` parses the JSONL run log into final text, tool calls, verification-looking commands, warnings, and errors. Use it after every run before trusting the worker's final message.
+- `opencode_changed_files` includes the Git snapshot from before the run when available, so Codex can distinguish newly introduced edits from pre-existing dirt.
 
 ## Verification Loop
 
@@ -52,10 +54,11 @@ For each task:
 
 1. Capture the intended outcome before delegation.
 2. Wait for OpenCode to finish.
-3. Check logs, changed files, and relevant app/test behavior.
+3. Check the parsed run summary, logs, changed files, and relevant app/test behavior.
 4. Ask: "Are there any gaps against the requested result?"
-5. If yes, send a narrow follow-up prompt to OpenCode describing only the gaps to fix.
-6. Repeat until the result is acceptable or the remaining gap needs user input.
+5. For frontend or UI changes, Codex should perform a real browser smoke check or screenshot review after OpenCode exits.
+6. If yes, send a narrow follow-up prompt to OpenCode describing only the gaps to fix.
+7. Repeat until the result is acceptable or the remaining gap needs user input.
 
 ## Prompt Shape
 
@@ -85,6 +88,8 @@ Verification to run:
 Final response:
 - Summarize changed files.
 - Report commands run and results.
+- If any verification command fails, report the exact command, exit status, and key error output. Do not call it pre-existing unless you have clear evidence from a baseline run or prior state.
+- For frontend/UI work, say whether a real browser/screenshot check is still needed from Codex.
 - List any gaps or risks.
 ```
 
