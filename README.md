@@ -10,8 +10,29 @@ It is designed for a planner/executor workflow:
 4. Codex starts one OpenCode run.
 5. Codex waits and monitors logs without interrupting the run.
 6. Codex inspects changed files after OpenCode exits.
+7. Codex checks the result against the original task and asks whether there are any gaps.
+8. If there are gaps, Codex delegates a focused improvement/fix to OpenCode and repeats the check.
 
 The MCP server intentionally exposes no stop, cancel, or kill tool.
+
+## Intended Control Flow
+
+OpenCode Worker is not meant to replace Codex's review step. The expected loop is:
+
+```text
+plan -> delegate to OpenCode -> wait -> inspect result -> check for gaps -> fix gaps -> repeat
+```
+
+After every delegated task, Codex should:
+
+- read the OpenCode log tail,
+- inspect changed files,
+- run or review relevant tests/builds when practical,
+- compare the result with the original request,
+- explicitly check whether anything is missing or wrong,
+- ask OpenCode for a focused follow-up fix when gaps are found.
+
+The task should only be considered done after Codex has completed that gap check.
 
 ## Requirements
 
