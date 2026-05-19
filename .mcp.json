@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "opencode-worker": {
+      "command": "node",
+      "args": [
+        "./scripts/opencode-worker-mcp.js"
+      ]
+    }
+  }
+}

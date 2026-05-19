@@ -1,0 +1,43 @@
+{
+  "name": "opencode-worker",
+  "version": "0.1.0",
+  "description": "Control OpenCode from Codex as a guarded local execution worker.",
+  "author": {
+    "name": "Cristian",
+    "url": "https://opencode.ai/"
+  },
+  "homepage": "https://opencode.ai/",
+  "repository": "https://github.com/ccycv/codex-opencode-worker",
+  "license": "MIT",
+  "keywords": [
+    "opencode",
+    "codex",
+    "worker",
+    "mcp",
+    "automation"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "OpenCode Worker",
+    "shortDescription": "Delegate Codex plans to OpenCode and wait for completion.",
+    "longDescription": "Use OpenCode Worker to let Codex launch, monitor, and wait for non-interactive OpenCode runs in the local workspace. The plugin prevents overlapping OpenCode jobs and intentionally exposes no interrupt or kill command.",
+    "developerName": "Cristian",
+    "category": "Coding",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://opencode.ai/",
+    "privacyPolicyURL": "https://opencode.ai/",
+    "termsOfServiceURL": "https://opencode.ai/",
+    "defaultPrompt": [
+      "Plan this change, then delegate the implementation to OpenCode.",
+      "Check whether OpenCode is running and wait for it.",
+      "Show the latest OpenCode worker logs."
+    ],
+    "brandColor": "#111827",
+    "screenshots": []
+  }
+}
