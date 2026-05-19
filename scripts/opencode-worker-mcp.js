@@ -10,7 +10,15 @@ const logDir = path.join(stateDir, "logs");
 const statePath = path.join(stateDir, "state.json");
 fs.mkdirSync(logDir, { recursive: true });
 
+const serverVersion = "0.1.1";
 const liveChildren = new Map();
+const postRunChecklist = [
+  "Call opencode_logs to inspect the OpenCode run output.",
+  "Call opencode_changed_files for the run workspace.",
+  "Read the affected files and run relevant tests/builds when practical.",
+  "Compare the result against the original plan and acceptance criteria.",
+  "If gaps remain, delegate a narrow follow-up fix to OpenCode and repeat the check."
+];
 
 function nowIso() {
   return new Date().toISOString();
@@ -146,6 +154,10 @@ function startOpencode(input = {}) {
     args,
     requestedModel: input.model || null,
     requestedAgent: input.agent || null,
+    taskTitle: input.title || null,
+    messagePreview: previewText(input.message),
+    acceptanceCriteria: Array.isArray(input.acceptanceCriteria) ? input.acceptanceCriteria : [],
+    verificationCommands: Array.isArray(input.verificationCommands) ? input.verificationCommands : [],
     logPath,
     startedAt: nowIso(),
     finishedAt: null,
@@ -183,6 +195,13 @@ function startOpencode(input = {}) {
   return summarizeState(state, 40);
 }
 
+function previewText(value, maxLength = 240) {
+  if (typeof value !== "string") return "";
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length <= maxLength) return compact;
+  return `${compact.slice(0, maxLength - 1)}…`;
+}
+
 function summarizeState(state = readState(), tailLines = 40) {
   if (!state) {
     return { running: false, status: "idle" };
@@ -207,8 +226,16 @@ function summarizeState(state = readState(), tailLines = 40) {
     signal: state.signal,
     requestedModel: state.requestedModel || null,
     requestedAgent: state.requestedAgent || null,
+    taskTitle: state.taskTitle || null,
+    messagePreview: state.messagePreview || null,
+    acceptanceCriteria: state.acceptanceCriteria || [],
+    verificationCommands: state.verificationCommands || [],
     logPath: state.logPath,
-    tail: readLogTail(state.logPath, tailLines)
+    tail: readLogTail(state.logPath, tailLines),
+    nextCodexActions: running ? [
+      "Do not start another OpenCode run while this one is running.",
+      "Wait with opencode_wait or inspect logs with opencode_logs."
+    ] : postRunChecklist
   };
 }
 
@@ -274,6 +301,56 @@ async function changedFiles(input = {}) {
   };
 }
 
+function delegationTemplate(input = {}) {
+  const plan = Array.isArray(input.plan) && input.plan.length
+    ? input.plan.map((item, index) => `${index + 1}. ${String(item)}`).join("\n")
+    : "1. <fill in the implementation steps>";
+  const files = Array.isArray(input.files) && input.files.length
+    ? input.files.map((item) => `- ${String(item)}`).join("\n")
+    : "- <fill in expected files/modules, or say \"discover and keep scope narrow\">";
+  const acceptance = Array.isArray(input.acceptanceCriteria) && input.acceptanceCriteria.length
+    ? input.acceptanceCriteria.map((item) => `- ${String(item)}`).join("\n")
+    : "- <fill in observable success criteria>";
+  const verification = Array.isArray(input.verificationCommands) && input.verificationCommands.length
+    ? input.verificationCommands.map((item) => `- ${String(item)}`).join("\n")
+    : "- <fill in tests/build/lint commands, or say what to inspect if commands are not available>";
+
+  return {
+    cwd: input.cwd || null,
+    model: input.model || null,
+    title: input.title || null,
+    prompt: `Context:
+- Project/workspace: ${input.cwd || "<workspace path>"}
+- User goal: ${input.goal || "<summarize the user's request>"}
+
+Plan:
+${plan}
+
+OpenCode task:
+- Implement only the plan above.
+- Do not revert unrelated user or Codex changes.
+- If you encounter existing edits, preserve them and work around them.
+- Keep the write scope focused to these files/modules when practical:
+${files}
+
+Acceptance criteria:
+${acceptance}
+
+Verification to run:
+${verification}
+
+Final response:
+- Summarize changed files.
+- Report commands run and results.
+- List any gaps, risks, or follow-up needed.`,
+    codexReminder: [
+      "Before starting OpenCode, call opencode_status.",
+      "Use opencode_run_and_wait for normal delegation.",
+      "After completion, run the post-run gap-check loop; do not trust the worker output alone."
+    ]
+  };
+}
+
 async function listModels(input = {}) {
   const args = ["models"];
   if (input.provider) args.push(String(input.provider));
@@ -323,7 +400,9 @@ const tools = [
         session: { type: "string" },
         fork: { type: "boolean" },
         files: { type: "array", items: { type: "string" } },
-        dangerouslySkipPermissions: { type: "boolean", description: "Pass OpenCode's dangerous auto-approval flag." }
+        dangerouslySkipPermissions: { type: "boolean", description: "Pass OpenCode's dangerous auto-approval flag." },
+        acceptanceCriteria: { type: "array", items: { type: "string" }, description: "Optional criteria stored in state for Codex's post-run gap check." },
+        verificationCommands: { type: "array", items: { type: "string" }, description: "Optional commands stored in state for Codex's post-run verification." }
       },
       required: ["message"]
     }
@@ -344,11 +423,30 @@ const tools = [
         fork: { type: "boolean" },
         files: { type: "array", items: { type: "string" } },
         dangerouslySkipPermissions: { type: "boolean" },
+        acceptanceCriteria: { type: "array", items: { type: "string" }, description: "Optional criteria stored in state for Codex's post-run gap check." },
+        verificationCommands: { type: "array", items: { type: "string" }, description: "Optional commands stored in state for Codex's post-run verification." },
         timeoutSeconds: { type: "number", default: 3600 },
         pollIntervalSeconds: { type: "number", default: 2 },
         tailLines: { type: "number", default: 80 }
       },
       required: ["message"]
+    }
+  },
+  {
+    name: "opencode_delegation_template",
+    description: "Create a structured planner/executor prompt for a bounded OpenCode implementation task.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        goal: { type: "string", description: "User goal to include in the prompt." },
+        cwd: { type: "string", description: "Workspace path to include in the prompt." },
+        model: { type: "string", description: "Optional model planned for the run." },
+        title: { type: "string", description: "Optional task title." },
+        plan: { type: "array", items: { type: "string" } },
+        files: { type: "array", items: { type: "string" } },
+        acceptanceCriteria: { type: "array", items: { type: "string" } },
+        verificationCommands: { type: "array", items: { type: "string" } }
+      }
     }
   },
   {
@@ -433,6 +531,7 @@ async function callTool(name, args) {
     return { logPath: state?.logPath || null, tail: readLogTail(state?.logPath, args?.lines ?? 200) };
   }
   if (name === "opencode_changed_files") return await changedFiles(args);
+  if (name === "opencode_delegation_template") return delegationTemplate(args);
   if (name === "opencode_models") return await listModels(args);
   if (name === "opencode_check_model") return await checkModel(args);
   throw new Error(`Unknown tool: ${name}`);
@@ -466,7 +565,7 @@ async function handle(message) {
       return respond(id, {
         protocolVersion: params?.protocolVersion || "2024-11-05",
         capabilities: { tools: {} },
-        serverInfo: { name: "opencode-worker", version: "0.1.0" }
+        serverInfo: { name: "opencode-worker", version: serverVersion }
       });
     }
     if (method === "notifications/initialized") return;

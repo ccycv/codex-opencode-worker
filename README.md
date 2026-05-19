@@ -15,6 +15,25 @@ It is designed for a planner/executor workflow:
 
 The MCP server intentionally exposes no stop, cancel, or kill tool.
 
+## Default Delegation Behavior
+
+If a user has established that OpenCode should be the executor for a project, Codex should prefer this plugin for implementation-sized coding work:
+
+- features,
+- UI changes,
+- bug fixes,
+- refactors,
+- test/build fixes.
+
+Codex should still do lightweight local work itself, such as reading files, running checks, inspecting logs, committing already-finished work, and verifying OpenCode's output. The intended split is:
+
+```text
+Codex: plan, supervise, verify, gap-check
+OpenCode: execute bounded implementation tasks
+```
+
+Every OpenCode task should include a plan, acceptance criteria, write-scope guidance, and verification commands. After OpenCode exits, Codex should inspect the logs and changed files, run relevant checks, then delegate a focused follow-up if gaps remain.
+
 ## Intended Control Flow
 
 OpenCode Worker is not meant to replace Codex's review step. The expected loop is:
@@ -57,6 +76,7 @@ The server looks for OpenCode in:
 
 - `opencode_start`: start one guarded OpenCode run
 - `opencode_run_and_wait`: start OpenCode and wait until it exits
+- `opencode_delegation_template`: produce a structured prompt template for a planner/executor OpenCode task
 - `opencode_status`: show the current/last run status and recent log tail
 - `opencode_wait`: wait for the current run without interrupting it
 - `opencode_logs`: read recent OpenCode worker logs
@@ -83,6 +103,18 @@ opencode run --model opencode/qwen3.6-plus-free
 ```
 
 Run `opencode_check_model` first when you want Codex to verify the model is visible before execution.
+
+## Delegation Prompt Template
+
+Use `opencode_delegation_template` to generate a consistent prompt shape for OpenCode. It reminds Codex to include:
+
+- context,
+- plan,
+- write scope,
+- acceptance criteria,
+- verification commands,
+- required final report,
+- a reminder not to revert unrelated changes.
 
 ## Install as a Codex Plugin
 

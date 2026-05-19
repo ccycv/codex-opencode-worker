@@ -1,7 +1,7 @@
 {
   "name": "opencode-worker",
-  "version": "0.1.0",
-  "description": "Control OpenCode from Codex as a guarded local execution worker.",
+  "version": "0.1.1",
+  "description": "Use OpenCode as Codex's persistent implementation executor with guarded runs and post-run gap checks.",
   "author": {
     "name": "Cristian",
     "url": "https://opencode.ai/"
@@ -20,8 +20,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "OpenCode Worker",
-    "shortDescription": "Delegate Codex plans to OpenCode and wait for completion.",
-    "longDescription": "Use OpenCode Worker to let Codex launch, monitor, and wait for non-interactive OpenCode runs in the local workspace. The plugin prevents overlapping OpenCode jobs and intentionally exposes no interrupt or kill command.",
+    "shortDescription": "Delegate implementation tasks to OpenCode and verify the result.",
+    "longDescription": "Use OpenCode Worker when Codex should plan/review while OpenCode executes implementation-sized coding tasks. The plugin launches, monitors, and waits for non-interactive OpenCode runs, prevents overlapping jobs, exposes no interrupt or kill command, and reinforces a post-run logs/changed-files/gap-check loop.",
     "developerName": "Cristian",
     "category": "Coding",
     "capabilities": [
@@ -34,7 +34,9 @@
     "termsOfServiceURL": "https://opencode.ai/",
     "defaultPrompt": [
       "Plan this change, then delegate the implementation to OpenCode.",
+      "Use OpenCode as the default executor for this project's implementation tasks.",
       "Check whether OpenCode is running and wait for it.",
+      "Create an OpenCode delegation prompt with acceptance criteria and verification commands.",
       "Show the latest OpenCode worker logs."
     ],
     "brandColor": "#111827",
