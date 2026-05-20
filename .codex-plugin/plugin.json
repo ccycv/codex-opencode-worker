@@ -1,6 +1,6 @@
 {
   "name": "opencode-worker",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Use OpenCode as Codex's persistent implementation executor with guarded runs and post-run gap checks.",
   "author": {
     "name": "Cristian",
@@ -38,6 +38,7 @@
       "Check whether OpenCode is running and wait for it.",
       "Create an OpenCode delegation prompt with acceptance criteria and verification commands.",
       "Summarize the last OpenCode run and identify verification gaps.",
+      "Show OpenCode token usage for the last delegated run.",
       "Show the latest OpenCode worker logs."
     ],
     "brandColor": "#111827",

@@ -10,7 +10,7 @@ const logDir = path.join(stateDir, "logs");
 const statePath = path.join(stateDir, "state.json");
 fs.mkdirSync(logDir, { recursive: true });
 
-const serverVersion = "0.1.2";
+const serverVersion = "0.1.3";
 const liveChildren = new Map();
 const postRunChecklist = [
   "Call opencode_run_summary to inspect parsed OpenCode output, tool calls, and verification-looking commands.",
@@ -118,6 +118,61 @@ function opencodeOutput(args) {
         stdout: stdout.trim(),
         stderr: stderr.trim(),
         error: error ? error.message : null
+      });
+    });
+  });
+}
+
+function opencodeFileOutput(args) {
+  return new Promise((resolve) => {
+    const opencodeBin = resolveOpencodeBin();
+    const tmpPath = path.join(os.tmpdir(), `opencode-worker-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.out`);
+    const out = fs.openSync(tmpPath, "w");
+    let stderr = "";
+    let closed = false;
+
+    function closeOutput() {
+      if (closed) return;
+      closed = true;
+      fs.closeSync(out);
+    }
+
+    const child = spawn(opencodeBin, args, {
+      env: {
+        ...process.env,
+        PATH: `${path.dirname(opencodeBin)}${path.delimiter}${process.env.PATH || ""}`
+      },
+      stdio: ["ignore", out, "pipe"]
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    child.on("error", (error) => {
+      closeOutput();
+      try { fs.unlinkSync(tmpPath); } catch {}
+      resolve({
+        ok: false,
+        stdout: "",
+        stderr: stderr.trim(),
+        error: error.message
+      });
+    });
+
+    child.on("close", (code) => {
+      closeOutput();
+      let stdout = "";
+      try {
+        stdout = fs.readFileSync(tmpPath, "utf8");
+      } finally {
+        try { fs.unlinkSync(tmpPath); } catch {}
+      }
+      resolve({
+        ok: code === 0,
+        stdout,
+        stderr: stderr.trim(),
+        error: code === 0 ? null : `opencode exited with code ${code}`
       });
     });
   });
@@ -550,6 +605,227 @@ async function checkModel(input = {}) {
   };
 }
 
+function tokenNumber(value) {
+  return Number.isFinite(Number(value)) ? Number(value) : 0;
+}
+
+function summarizeTokenUsage(tokens = {}) {
+  const input = tokenNumber(tokens.input);
+  const output = tokenNumber(tokens.output);
+  const reasoning = tokenNumber(tokens.reasoning);
+  const cacheRead = tokenNumber(tokens.cache?.read);
+  const cacheWrite = tokenNumber(tokens.cache?.write);
+  return {
+    input,
+    output,
+    reasoning,
+    cacheRead,
+    cacheWrite,
+    totalWithoutCache: input + output + reasoning,
+    totalWithCache: input + output + reasoning + cacheRead + cacheWrite
+  };
+}
+
+function sessionIdFromLog(logPath) {
+  const lines = readLogLines(logPath);
+  let sessionID = null;
+  for (const line of lines) {
+    const event = parseMaybeJson(line);
+    if (!event) continue;
+    if (typeof event.sessionID === "string") sessionID = event.sessionID;
+    if (typeof event.part?.sessionID === "string") sessionID = event.part.sessionID;
+  }
+  return sessionID;
+}
+
+function tokenUsageFromLog(logPath) {
+  const lines = readLogLines(logPath);
+  let latestTokens = null;
+  let tokenEventCount = 0;
+  for (const line of lines) {
+    const event = parseMaybeJson(line);
+    const tokens = event?.part?.tokens || event?.tokens;
+    if (!tokens || typeof tokens !== "object") continue;
+    tokenEventCount++;
+    latestTokens = tokens;
+  }
+  if (!latestTokens) return null;
+  return {
+    source: "latest-token-event-in-worker-log",
+    tokenEventCount,
+    tokens: summarizeTokenUsage(latestTokens),
+    rawTokens: latestTokens
+  };
+}
+
+async function exportOpenCodeSession(sessionID, sanitize = false) {
+  const args = ["export", sessionID];
+  if (sanitize) args.push("--sanitize");
+  const result = await opencodeFileOutput(args);
+  if (!result.ok) {
+    throw new Error(result.stderr || result.error || `Failed to export OpenCode session ${sessionID}`);
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch (error) {
+    throw new Error(`Failed to parse OpenCode session export for ${sessionID}: ${error.message}`);
+  }
+}
+
+async function exportSessionWithFallback(sessionID, sanitize = false) {
+  try {
+    return {
+      exported: await exportOpenCodeSession(sessionID, sanitize),
+      source: sanitize ? "opencode-export-sanitized" : "opencode-export",
+      sanitized: Boolean(sanitize),
+      error: null
+    };
+  } catch (error) {
+    if (sanitize) {
+      return {
+        exported: null,
+        source: "opencode-export-sanitized",
+        sanitized: true,
+        error
+      };
+    }
+    try {
+      return {
+        exported: await exportOpenCodeSession(sessionID, true),
+        source: "opencode-export-sanitized",
+        sanitized: true,
+        error: null
+      };
+    } catch (sanitizedError) {
+      return {
+        exported: null,
+        source: "opencode-export",
+        sanitized: false,
+        error: new Error(`${error.message}; sanitized retry failed: ${sanitizedError.message}`)
+      };
+    }
+  }
+}
+
+function parseCompactNumber(value) {
+  if (typeof value !== "string") return 0;
+  const trimmed = value.trim().replace(/,/g, "");
+  const match = /^([0-9]+(?:\.[0-9]+)?)([KMB])?$/i.exec(trimmed);
+  if (!match) return Number(trimmed) || 0;
+  const n = Number(match[1]);
+  const suffix = (match[2] || "").toUpperCase();
+  if (suffix === "K") return Math.round(n * 1_000);
+  if (suffix === "M") return Math.round(n * 1_000_000);
+  if (suffix === "B") return Math.round(n * 1_000_000_000);
+  return Math.round(n);
+}
+
+function parseStatsOutput(stdout) {
+  const fields = {};
+  const wanted = {
+    Sessions: "sessions",
+    Messages: "messages",
+    Days: "days",
+    "Total Cost": "totalCost",
+    "Avg Cost/Day": "avgCostPerDay",
+    "Avg Tokens/Session": "avgTokensPerSession",
+    "Median Tokens/Session": "medianTokensPerSession",
+    Input: "input",
+    Output: "output",
+    "Cache Read": "cacheRead",
+    "Cache Write": "cacheWrite"
+  };
+
+  for (const line of String(stdout || "").split(/\r?\n/)) {
+    const clean = line
+      .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
+      .replace(/[│┌┐└┘├┤─]/g, " ")
+      .trim();
+    for (const [label, key] of Object.entries(wanted)) {
+      if (!clean.startsWith(label)) continue;
+      if (fields[key] !== undefined) continue;
+      const value = clean.slice(label.length).trim();
+      if (/^[A-Za-z]/.test(value)) continue;
+      fields[key] = key.toLowerCase().includes("cost") ? value : parseCompactNumber(value);
+    }
+  }
+
+  if (fields.input !== undefined || fields.output !== undefined || fields.cacheRead !== undefined || fields.cacheWrite !== undefined) {
+    fields.totalWithoutCache = tokenNumber(fields.input) + tokenNumber(fields.output);
+    fields.totalWithCache = fields.totalWithoutCache + tokenNumber(fields.cacheRead) + tokenNumber(fields.cacheWrite);
+  }
+  return fields;
+}
+
+async function usage(input = {}) {
+  const state = readState();
+  const session = input.session || (input.latestWorkerRun === false ? null : sessionIdFromLog(state?.logPath));
+  const includeAggregate = Boolean(input.aggregate || input.days || input.project || !session);
+  const result = {
+    latestWorkerRun: state ? {
+      id: state.id,
+      taskTitle: state.taskTitle || null,
+      cwd: state.cwd || null,
+      logPath: state.logPath || null,
+      status: summarizeState(state, 0).status
+    } : null,
+    sessionUsage: null,
+    aggregateStats: null
+  };
+
+  if (session) {
+    const latestLogSession = sessionIdFromLog(state?.logPath);
+    const exportResult = await exportSessionWithFallback(session, Boolean(input.sanitize));
+    if (exportResult.exported) {
+      const exported = exportResult.exported;
+      const info = exported.info || {};
+      result.sessionUsage = {
+        source: exportResult.source,
+        sessionID: session,
+        sanitized: exportResult.sanitized,
+        title: info.title || null,
+        directory: info.directory || null,
+        model: info.model || null,
+        cost: info.cost ?? null,
+        messages: Array.isArray(exported.messages) ? exported.messages.length : null,
+        changedFilesSummary: info.summary || null,
+        tokens: summarizeTokenUsage(info.tokens || {}),
+        rawTokens: info.tokens || null
+      };
+    } else {
+      const canUseLatestLogFallback = latestLogSession === session;
+      result.sessionUsage = {
+        source: exportResult.source,
+        sessionID: session,
+        sanitized: exportResult.sanitized,
+        error: exportResult.error.message,
+        logFallback: canUseLatestLogFallback ? tokenUsageFromLog(state?.logPath) : null,
+        logFallbackNote: canUseLatestLogFallback
+          ? "Export failed, so this uses the latest token event from the matching worker log."
+          : "Export failed and the latest worker log is for a different session, so no log fallback was used."
+      };
+    }
+  }
+
+  if (includeAggregate) {
+    const args = ["stats"];
+    if (input.days !== undefined) args.push("--days", String(input.days));
+    if (input.models !== false) args.push("--models");
+    if (input.project !== undefined) args.push("--project", String(input.project));
+    const stats = await opencodeOutput(args);
+    result.aggregateStats = {
+      ok: stats.ok,
+      command: `opencode ${args.join(" ")}`,
+      parsed: parseStatsOutput(stats.stdout),
+      raw: stats.stdout,
+      stderr: stats.stderr,
+      error: stats.error
+    };
+  }
+
+  return result;
+}
+
 const tools = [
   {
     name: "opencode_start",
@@ -693,6 +969,22 @@ const tools = [
       },
       required: ["model"]
     }
+  },
+  {
+    name: "opencode_usage",
+    description: "Report OpenCode token/cost usage. Defaults to the latest delegated OpenCode worker session and can also include aggregate `opencode stats` output.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session: { type: "string", description: "Optional OpenCode session ID. Defaults to the latest worker run session when available." },
+        latestWorkerRun: { type: "boolean", default: true, description: "When session is omitted, infer the session ID from the latest worker run log." },
+        aggregate: { type: "boolean", default: false, description: "Also include aggregate `opencode stats` output." },
+        days: { type: "number", description: "Aggregate stats window, passed to `opencode stats --days`." },
+        project: { type: "string", description: "Optional aggregate stats project filter, passed to `opencode stats --project`." },
+        models: { type: "boolean", default: true, description: "Include model breakdown in aggregate stats." },
+        sanitize: { type: "boolean", default: false, description: "Use `opencode export --sanitize` for session export." }
+      }
+    }
   }
 ];
 
@@ -716,6 +1008,7 @@ async function callTool(name, args) {
   if (name === "opencode_delegation_template") return delegationTemplate(args);
   if (name === "opencode_models") return await listModels(args);
   if (name === "opencode_check_model") return await checkModel(args);
+  if (name === "opencode_usage") return await usage(args);
   throw new Error(`Unknown tool: ${name}`);
 }
 

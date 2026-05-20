@@ -84,8 +84,39 @@ The server looks for OpenCode in:
 - `opencode_logs`: read recent OpenCode worker logs
 - `opencode_run_summary`: parse the JSONL log into final text, tool calls, verification-looking commands, warnings, and errors
 - `opencode_changed_files`: show Git status and diff stats for the run workspace
+- `opencode_usage`: show token/cost usage for the latest delegated OpenCode session, a specific OpenCode session, or aggregate `opencode stats`
 - `opencode_models`: list models visible to OpenCode
 - `opencode_check_model`: check a `provider/model` string before starting
+
+## Usage and Token Stats
+
+Use `opencode_usage` after a run to see token usage without manually exporting sessions:
+
+```json
+{
+  "latestWorkerRun": true
+}
+```
+
+It reports the latest delegated OpenCode session's input, output, cache read, cache write, total-without-cache, total-with-cache, model, cost, and message count.
+
+To inspect a specific OpenCode session:
+
+```json
+{
+  "session": "ses_..."
+}
+```
+
+To include aggregate OpenCode stats:
+
+```json
+{
+  "aggregate": true,
+  "days": 2,
+  "models": true
+}
+```
 
 ## Model Selection
 

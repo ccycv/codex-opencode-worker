@@ -45,6 +45,9 @@ When in doubt for implementation work, delegate. When OpenCode is unavailable or
 - Pass the workspace path as `cwd` when the task should run outside Codex's current working directory.
 - `opencode_run_summary` parses the JSONL run log into final text, tool calls, verification-looking commands, warnings, and errors. Use it after every run before trusting the worker's final message.
 - `opencode_changed_files` includes the Git snapshot from before the run when available, so Codex can distinguish newly introduced edits from pre-existing dirt.
+- `opencode_usage` reports OpenCode token/cost usage for the latest delegated run, a specific OpenCode session ID, or aggregate `opencode stats`.
+
+Use `opencode_usage` when the user asks how many tokens OpenCode used. By default, call it with `latestWorkerRun: true` after a delegated task. Use `aggregate: true` and `days` when the user wants broader usage totals.
 
 ## Verification Loop
 
